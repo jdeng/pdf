@@ -124,7 +124,7 @@ func NewReader(f io.ReaderAt, size int64) (*Reader, error) {
 func NewReaderEncrypted(f io.ReaderAt, size int64, pw func() string) (*Reader, error) {
 	buf := make([]byte, 10)
 	f.ReadAt(buf, 0)
-	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' || buf[8] != '\r' && buf[8] != '\n' {
+	if !bytes.HasPrefix(buf, []byte("%PDF-1.")) || buf[7] < '0' || buf[7] > '7' {
 		return nil, fmt.Errorf("not a PDF file: invalid header")
 	}
 	end := size
@@ -498,7 +498,31 @@ func (v Value) String() string {
 	return objfmt(v.data)
 }
 
+func (v Value) StringWithMap(m map[uint32]uint32) string {
+	return mobjfmt(v.data, &m)
+}
+
+func (r *Reader) Resolve(id uint32) Value {
+	return r.resolve(objptr{}, objptr{id: id})
+}
+
 func objfmt(x interface{}) string {
+	return mobjfmt(x, nil)
+}
+
+func mid(id uint32, m *map[uint32]uint32) uint32 {
+	if m == nil {
+		return id
+	}
+
+	if nid, ok := (*m)[id]; ok {
+		return nid
+	}
+
+	return id
+}
+
+func mobjfmt(x interface{}, m *map[uint32]uint32) string {
 	switch x := x.(type) {
 	default:
 		return fmt.Sprint(x)
@@ -528,7 +552,7 @@ func objfmt(x interface{}) string {
 			buf.WriteString("/")
 			buf.WriteString(k)
 			buf.WriteString(" ")
-			buf.WriteString(objfmt(elem))
+			buf.WriteString(mobjfmt(elem, m))
 		}
 		buf.WriteString(">>")
 		return buf.String()
@@ -540,20 +564,25 @@ func objfmt(x interface{}) string {
 			if i > 0 {
 				buf.WriteString(" ")
 			}
-			buf.WriteString(objfmt(elem))
+			buf.WriteString(mobjfmt(elem, m))
 		}
 		buf.WriteString("]")
 		return buf.String()
 
 	case stream:
-		return fmt.Sprintf("%v@%d", objfmt(x.hdr), x.offset)
+		return fmt.Sprintf("%v@%d", mobjfmt(x.hdr, m), x.offset)
 
 	case objptr:
-		return fmt.Sprintf("%d %d R", x.id, x.gen)
+		return fmt.Sprintf("%d %d R", mid(x.id, m), x.gen)
 
 	case objdef:
-		return fmt.Sprintf("{%d %d obj}%v", x.ptr.id, x.ptr.gen, objfmt(x.obj))
+		return fmt.Sprintf("{%d %d obj}%v", mid(x.ptr.id, m), x.ptr.gen, mobjfmt(x.obj, m))
 	}
+}
+
+// P returns v's ptr id
+func (v Value) P() uint32 {
+	return v.ptr.id
 }
 
 // Bool returns v's boolean value.
@@ -785,6 +814,48 @@ func (e *errorReadCloser) Read([]byte) (int, error) {
 
 func (e *errorReadCloser) Close() error {
 	return e.err
+}
+
+func (v Value) RawReader() io.Reader {
+	x, ok := v.data.(stream)
+	if !ok {
+		return nil
+	}
+	return io.NewSectionReader(v.r.f, x.offset, v.Key("Length").Int64())
+}
+
+func objptrs(r *Reader, obj object) []uint32 {
+	switch obj.(type) {
+	case objptr:
+		ptr := obj.(objptr)
+		v := r.resolve(objptr{}, ptr)
+		ids := v.ObjPtrs()
+		switch v.data.(type) {
+		case array, stream, dict:
+			ids = append(ids, ptr.id)
+		}
+		return ids
+	case array:
+		var ids []uint32
+		for _, o := range obj.(array) {
+			ids = append(ids, objptrs(r, o)...)
+		}
+		return ids
+	case dict:
+		var ids []uint32
+		for _, o := range obj.(dict) {
+			ids = append(ids, objptrs(r, o)...)
+		}
+		return ids
+	case stream:
+		return objptrs(r, obj.(stream).hdr)
+	}
+
+	return nil
+}
+
+func (v Value) ObjPtrs() []uint32 {
+	return objptrs(v.r, v.data)
 }
 
 // Reader returns the data contained in the stream v.
