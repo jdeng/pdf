@@ -79,7 +79,8 @@ func (b *buffer) readByte() byte {
 }
 
 func (b *buffer) errorf(format string, args ...interface{}) {
-	panic(fmt.Errorf(format, args...))
+	// panic(fmt.Errorf(format, args...))
+	fmt.Errorf(format, args...)
 }
 
 func (b *buffer) reload() bool {
